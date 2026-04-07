@@ -1,42 +1,50 @@
 import mysql.connector
-from mysql.connector import Error
 
-def conectar_banco():
-    """Faz a ponte entre o Python e o XAMPP"""
+def obter_conexao():
+    return mysql.connector.connect(
+        host="localhost",
+        user="root",
+        password="",
+        database="chat_db"
+    )
+
+def registrar_usuario(nome, senha):
     try:
-        conexao = mysql.connector.connect(
-            host='localhost',
-            user='root',      # Padrão XAMPP
-            password='',      # Padrão XAMPP (vazio)
-            database='chat_db'
-        )
-        if conexao.is_connected():
-            return conexao
-    except Error as e:
-        print(f"Erro ao conectar ao MySQL: {e}")
-        return None
-
-def registrar_usuario_db(nome, senha):
-    """Exemplo de função para salvar novo usuário"""
-    conn = conectar_banco()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            query = "INSERT INTO usuarios (nome_usuario, senha) VALUES (%s, %s)"
-            cursor.execute(query, (nome, senha))
-            conn.commit()
-            print(f"Usuário {nome} registrado com sucesso!")
-        except Error as e:
-            print(f"Erro no registro: {e}")
-        finally:
-            conn.close()
-
-def salvar_historico_local(usuario, msg):
-    """Salva a conversa na tabela historico_local"""
-    conn = conectar_banco()
-    if conn:
+        conn = obter_conexao()
         cursor = conn.cursor()
-        query = "INSERT INTO historico_local (usuario, mensagem) VALUES (%s, %s)"
-        cursor.execute(query, (usuario, msg))
+
+        cursor.execute("SELECT id FROM usuarios WHERE nome_usuario = %s", (nome,))
+        if cursor.fetchone():
+            return False, "Usuário já existe!"
+        
+        cursor.execute("INSERT INTO usuarios (nome_usuario, senha) VALUES (%s, %s)", (nome, senha))
         conn.commit()
+        return True, "Cadastro realizado com sucesso!"
+    except Exception as e:
+        return False, f"Erro no banco: {e}"
+    finally:
         conn.close()
+
+def validar_login(nome, senha):
+    try:
+        conn = obter_conexao()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM usuarios WHERE nome_usuario = %s AND senha = %s", (nome, senha))
+        usuario = cursor.fetchone()
+        if usuario:
+            # Atualiza status para online
+            cursor.execute("UPDATE usuarios SET status = 'online' WHERE id = %s", (usuario['id'],))
+            conn.commit()
+            return True, usuario
+        return False, "Usuário ou senha incorretos."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+def logout_db(usuario_id):
+    conn = obter_conexao()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE usuarios SET status = 'offline' WHERE id = %s", (usuario_id,))
+    conn.commit()
+    conn.close()

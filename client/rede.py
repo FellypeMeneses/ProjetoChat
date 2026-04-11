@@ -39,7 +39,7 @@ class ClienteRede:
         """Loop infinito rodando em paralelo para receber respostas do servidor"""
         while self.conectado:
             try:
-                mensagem_bytes = self.socket.recv(1024)
+                mensagem_bytes = self.socket.recv(8192)
                 if not mensagem_bytes:
                     break  # Servidor fechou a conexão
                 

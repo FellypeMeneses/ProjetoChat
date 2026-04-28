@@ -1,4 +1,59 @@
 import mysql.connector
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
+import os
+import base64
+
+_chaves_por_usuario = {}  # cache em memória: usuario -> chave_aes
+
+def derivar_chave_local(senha, salt=None):
+    """
+    Deriva uma chave AES-256 a partir da senha do usuário.
+    Se salt for None, gera um novo salt (para primeira vez).
+    Retorna (chave, salt)
+    """
+    if salt is None:
+        salt = os.urandom(32)  # 32 bytes de salt
+    
+    kdf = PBKDF2(
+        algorithm=hashes.SHA256(),
+        length=32,  # 32 bytes = AES-256
+        salt=salt,
+        iterations=100000,  # 100k iterações para dificular brute-force
+        backend=default_backend()
+    )
+    chave = kdf.derive(senha.encode('utf-8'))
+    return chave, salt
+
+def cifrar_mensagem_local(texto, chave_aes):
+    """Cifra uma mensagem para armazenamento local"""
+    iv = os.urandom(12)  # GCM precisa de 12 bytes de IV
+    cipher = Cipher(algorithms.AES(chave_aes), modes.GCM(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    
+    texto_bytes = texto.encode('utf-8')
+    cifrado = encryptor.update(texto_bytes) + encryptor.finalize()
+    
+    return {
+        "iv": base64.b64encode(iv).decode('utf-8'),
+        "tag": base64.b64encode(encryptor.tag).decode('utf-8'),
+        "cifrado": base64.b64encode(cifrado).decode('utf-8')
+    }
+
+def decifrar_mensagem_local(pacote, chave_aes):
+    """Decifra uma mensagem do armazenamento local"""
+    iv = base64.b64decode(pacote["iv"])
+    tag = base64.b64decode(pacote["tag"])
+    cifrado = base64.b64decode(pacote["cifrado"])
+    
+    cipher = Cipher(algorithms.AES(chave_aes), modes.GCM(iv, tag), backend=default_backend())
+    decryptor = cipher.decryptor()
+    texto_bytes = decryptor.update(cifrado) + decryptor.finalize()
+    
+    return texto_bytes.decode('utf-8')
+
 
 def conectar():
     """Conecta ao MySQL e garante que a tabela de histórico do cliente existe"""
@@ -21,6 +76,15 @@ def conectar():
             data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    # Tabela para armazenar o salt do usuário (apenas o salt, não a chave!)
+    cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usuario_salt (
+                usuario VARCHAR(50) PRIMARY KEY,
+                salt TEXT
+            )
+        ''')
+        
     conn.commit()
     return conn, cursor
 

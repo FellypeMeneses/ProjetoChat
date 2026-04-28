@@ -1,4 +1,10 @@
 import mysql.connector
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+import os
+
+ph = PasswordHasher()
+
 
 def obter_conexao():
     return mysql.connector.connect(
@@ -8,18 +14,23 @@ def obter_conexao():
         database="chat_db"
     )
 
-# --- FUNÇÕES DE USUÁRIO ---
+# --- FUNÇÕES DE USUÁRIO (agora com argon2)---
 
 def registrar_usuario(nome, senha):
     try:
         conn = obter_conexao()
         cursor = conn.cursor()
+        
         # Usamos LOWER para evitar "Admin" e "admin" como usuários diferentes
         cursor.execute("SELECT id FROM usuarios WHERE LOWER(nome_usuario) = LOWER(%s)", (nome,))
         if cursor.fetchone():
             return False, "Usuário já existe!"
         
-        cursor.execute("INSERT INTO usuarios (nome_usuario, senha, status) VALUES (%s, %s, 'offline')", (nome, senha))
+        # Gera hash da senha com Argon2 (salt embutido automaticamente)
+        
+        hash_senha = ph.hash(senha)
+        
+        cursor.execute("INSERT INTO usuarios (nome_usuario, senha, status) VALUES (%s, %s, 'offline')", (nome, hash_senha))
         conn.commit()
         return True, "Cadastro realizado com sucesso!"
     except Exception as e:
@@ -28,16 +39,33 @@ def registrar_usuario(nome, senha):
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
+# --- NOVA FUNÇÃO: Validar login com Argon2 ---
+
 def validar_login(nome, senha):
     try:
         conn = obter_conexao()
-        cursor = conn.cursor(dictionary=True) 
-        cursor.execute("SELECT * FROM usuarios WHERE nome_usuario = %s AND senha = %s", (nome, senha))
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("SELECT * FROM usuarios WHERE nome_usuario = %s", (nome,))
         usuario = cursor.fetchone()
+        
+    
         if usuario:
+            #verifica a senha usando Argon2 (comparação segura)
+
+            ph.verify(usuario['senha'], senha)
+
+            # Se a senha estiver correta, verificamos se o hash precisa ser atualizado (re-hash) para manter a segurança
+
+            if ph.check_needs_rehash(usuario['senha_hash']):
+                novo_hash = ph.hash(senha)
+                cursor.execute("UPDATE usuarios SET senha = %s WHERE id = %s", (novo_hash, usuario['id']))
+                conn.commit()
+
             cursor.execute("UPDATE usuarios SET status = 'online' WHERE id = %s", (usuario['id'],))
             conn.commit()
             return True, usuario
+    except VerifyMismatchError:
         return False, "Usuário ou senha incorretos."
     except Exception as e:
         return False, str(e)

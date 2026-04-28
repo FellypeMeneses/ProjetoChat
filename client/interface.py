@@ -1,15 +1,15 @@
 import tkinter as tk
 
 class Cores:
-    BG_FUNDO = "#ECE5DD"         
-    BG_CARD = "#FFFFFF"          
-    PRIMARIA = "#008069"         
-    PRIMARIA_CLARA = "#00A884"   
-    TEXTO_ESCURO = "#111B21"     
-    TEXTO_CLARO = "#FFFFFF"      
-    CINZA_TEXTO = "#667781"      
-    BOTAO_VOLTAR = "#8696A0"     
-    ERRO = "#EF4444"             
+    BG_FUNDO = "#ECE5DD"
+    BG_CARD = "#FFFFFF"
+    PRIMARIA = "#008069"
+    PRIMARIA_CLARA = "#00A884"
+    TEXTO_ESCURO = "#111B21"
+    TEXTO_CLARO = "#FFFFFF"
+    CINZA_TEXTO = "#667781"
+    BOTAO_VOLTAR = "#8696A0"
+    ERRO = "#EF4444"
 
 def criar_card_central(frame_pai):
     frame_pai.configure(bg=Cores.BG_FUNDO)

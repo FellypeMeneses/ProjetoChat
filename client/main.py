@@ -4,6 +4,10 @@ import interface
 from rede import ClienteRede
 import historico
 import json
+import crypto_utils
+import os
+import threading
+
 
 class ChatApp:
     def __init__(self, root):
@@ -12,7 +16,42 @@ class ChatApp:
         self.root.geometry("450x600")
         self.usuario_logado = None
         self.contato_atual = None
+        self.timeout_digitando = None
+        self.tipo_evento = None
+        self.timer_expiracao = None
+        self.contador_msgs_sessao = 0
         
+    def iniciar_timer_expiracao_sessao(self):
+    #Inicia timer para mostrar quando a sessão vai expirar"""
+        if self.timer_expiracao:
+            self.root.after_cancel(self.timer_expiracao)
+    
+        self.timer_expiracao = self.root.after(55000, self.mostrar_aviso_expiracao)  # 55 segundos
+        
+    def mostrar_aviso_expiracao(self):
+    #Mostra aviso que a sessão vai expirar em 5 segundos"""
+        messagebox.showwarning(
+        "Sessão Expirando",
+        "A sessão criptográfica vai expirar em 5 segundos. Nova chave será gerada automaticamente."
+    )
+        self.root.after(5000, self.forcar_renovacao_sessao)
+        
+    def forcar_renovacao_sessao(self):
+    #Força renovação da sessão"""
+        if hasattr(self.rede, 'sessao') and self.rede.sessao:
+            self.rede._renovar_sessao()
+        # Reiniciar timer
+            self.iniciar_timer_expiracao_sessao()
+        
+        #verifica se ja existe outra chave privada (para manter a mesma identidade em logins futuros)
+        self.chave_privada = None
+        self.chave_publica_bytes = None
+        
+        if os.path.exists("chave_privada.pem"):
+            self.chave_privada = crypto_utils.carregar_chave_privada()
+            self.chave_publica_bytes = crypto_utils.obter_chave_publica_bytes(self.chave_privada.public_key())
+            
+            
         self.rede = ClienteRede()
         sucesso, msg = self.rede.conectar()
         if not sucesso:
@@ -44,12 +83,13 @@ class ChatApp:
     def tela_principal(self):
         self.limpar_container()
         self.contato_atual = None
+        self.iniciar_timer_expiracao_sessao()
         
         # ATUALIZAÇÃO: Agora passamos self.solicitar_excluir_conta como o 5º argumento
         self.lista_contatos_box = interface.montar_layout_contatos(
-            self.container, 
-            self.usuario_logado, 
-            self.pedir_contatos_ao_servidor, 
+            self.container,
+            self.usuario_logado,
+            self.pedir_contatos_ao_servidor,
             self.abrir_login,
             self.solicitar_excluir_conta  # <-- Botão de exclusão de conta
         )
@@ -65,7 +105,7 @@ class ChatApp:
         
         self.limpar_container()
         self.list_mensagens, self.ent_mensagem = interface.montar_layout_chat(
-            self.container, self.contato_atual, self.enviar_mensagem_texto, 
+            self.container, self.contato_atual, self.enviar_mensagem_texto,
             self.tela_principal, self.solicitar_exclusao, self.solicitar_edicao
         )
         
@@ -75,17 +115,26 @@ class ChatApp:
 
     def enviar_mensagem_texto(self):
         texto = self.ent_mensagem.get()
-        if texto.strip():
+        if texto.strip() and self.contato_atual in self.sessoes_e2ee:
+            
             pacote = {"acao": "enviar_mensagem", "destinatario": self.contato_atual, "conteudo": texto}
             self.rede.enviar(pacote)
             historico.salvar_mensagem(self.usuario_logado, self.contato_atual, "Você", texto)
             self.inserir_texto_no_chat(f"Você: {texto}")
             self.ent_mensagem.delete(0, tk.END)
 
+        # Contar mensagens para renovação
+        self.contador_msgs_sessao += 1
+        if self.contador_msgs_sessao >= 90:  # 90 mensagens (alerta com 10 de folga)
+            self.root.after(0, lambda: messagebox.showwarning(
+                "Mensagens Restantes",
+                f"Mais {100 - self.contador_msgs_sessao} mensagens até renovação da sessão."
+            ))
+
     def solicitar_excluir_conta(self):
         """ Nova função para lidar com o botão de deletar conta """
         confirmacao = messagebox.askyesno(
-            "Excluir Conta", 
+            "Excluir Conta",
             "Tem certeza que deseja excluir sua conta permanentemente?\nEsta ação não pode ser desfeita."
         )
         if confirmacao:
@@ -135,6 +184,20 @@ class ChatApp:
         senha = self.ent_cad_pass.get()
         if user and senha:
             self.rede.enviar({"acao": "registrar", "usuario": user, "senha": senha})
+            if not self.chave_privada:
+                priv, pub = crypto_utils.gerar_par_chaves_ecc()
+                self.chave_privada = priv
+                self.chave_publica = pub
+                self.chave_publica_bytes = crypto_utils.obter_chave_publica_bytes(pub)
+                crypto_utils.salvar_chave_privada(priv)
+                
+            # Envia chave pública junto com registro
+            self.rede.enviar({
+                "acao": "registrar",
+                "usuario": user,
+                "senha": senha,
+                "chave_publica": self.chave_publica_bytes.hex()  # Envia em hexadecimal
+            })
 
     def solicitar_login(self):
         user = self.ent_login_user.get()
@@ -162,6 +225,7 @@ class ChatApp:
                 self.root.after(0, self.tela_principal)
             else:
                 messagebox.showerror("Erro", dados["mensagem"])
+                
 
         elif acao == "resposta_exclusao_conta":
             if dados["sucesso"]:

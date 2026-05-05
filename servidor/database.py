@@ -13,7 +13,7 @@ def obter_conexao():
         database="chat_db"
     )
 
-def registrar_usuario(nome, senha):
+def registrar_usuario(nome, senha, chave_publica):
     try:
         conn = obter_conexao()
         cursor = conn.cursor()
@@ -27,11 +27,33 @@ def registrar_usuario(nome, senha):
         hash_senha = ph.hash(senha)
         
         # 3. Salva no banco de dados na coluna 'senha'
-        cursor.execute("INSERT INTO usuarios (nome_usuario, senha, status) VALUES (%s, %s, 'offline')", (nome, hash_senha))
+        cursor.execute("INSERT INTO usuarios (nome_usuario, senha, status, chave_publica) VALUES (%s, %s, 'offline', %s)", (nome, hash_senha, chave_publica))
         conn.commit()
         return True, "Cadastro realizado com sucesso!"
     except Exception as e:
         return False, f"Erro ao registrar no banco: {e}"
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
+
+def atualizar_chave_publica(nome_usuario, nova_chave_publica, senha):
+    """Atualiza chave pública (novo dispositivo) - verifica senha primeiro"""
+    try:
+        conn = obter_conexao()
+        cursor = conn.cursor(dictionary=True)
+        
+        cursor.execute("SELECT senha FROM usuarios WHERE nome_usuario = %s", (nome_usuario,))
+        usuario = cursor.fetchone()
+        
+        if usuario:
+            ph.verify(usuario['senha'], senha)
+            cursor.execute("UPDATE usuarios SET chave_publica = %s WHERE nome_usuario = %s",
+                        (nova_chave_publica, nome_usuario))
+            conn.commit()
+            return True, "Chave pública atualizada"
+        return False, "Usuário não encontrado"
+    except VerifyMismatchError:
+        return False, "Senha incorreta"
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()

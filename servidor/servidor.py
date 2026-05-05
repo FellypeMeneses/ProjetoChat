@@ -1,8 +1,10 @@
+import os
 import socket
 import threading
 import json
 import database
 from crypto_session import SessaoCriptografada
+from servidor import crypto_utils
 
 class ServidorChat:
     def __init__(self):
@@ -15,6 +17,8 @@ class ServidorChat:
         self.server_socket.listen()
         print(f"--- [SERVIDOR] Ativo em {self.host}:{self.porta} ---")
 
+        self.nonces_pendentes = {}  # usuario -> nonce
+        
     def iniciar(self):
         while True:
             client_socket, endereco = self.server_socket.accept()
@@ -46,7 +50,8 @@ class ServidorChat:
                 acao = dados.get("acao")
                 
                 if acao == "registrar":
-                    sucesso, msg = database.registrar_usuario(dados['usuario'].strip(), dados['senha'])
+                    chave_pub = dados.get('chave_publica')
+                    sucesso, msg = database.registrar_usuario(dados['usuario'].strip(), dados['senha'], chave_pub)
                     client_socket.send(json.dumps({"acao": "resposta_registro", "sucesso": sucesso, "mensagem": msg}).encode('utf-8'))
                 
                 elif acao == "login":
@@ -98,6 +103,68 @@ class ServidorChat:
                     sucesso, msg = database.excluir_conta_db(usuario_atual)
                     client_socket.send(json.dumps({"acao": "resposta_exclusao_conta", "sucesso": sucesso, "mensagem": msg}).encode('utf-8'))
                     if sucesso: conectado = False
+                                        
+                        
+                    elif acao == "login_desafio":
+                        usuario = dados.get('usuario')
+                        
+                        # Gera nonce de 32 bytes aleatórios
+                        nonce = os.urandom(32).hex()
+                        self.nonces_pendentes[usuario] = nonce
+                        
+                        # Envia o desafio
+                        client_socket.send(json.dumps({
+                            "acao": "desafio_login",
+                            "nonce": nonce
+                        }).encode('utf-8'))
+
+                    elif acao == "resposta_desafio":
+                        usuario = dados.get('usuario')
+                        nonce_recebido = dados.get('nonce')
+                        assinatura = bytes.fromhex(dados.get('assinatura'))
+                        
+                        # Verifica se o nonce está pendente
+                        nonce_esperado = self.nonces_pendentes.get(usuario)
+                        if not nonce_esperado or nonce_esperado != nonce_recebido:
+                            client_socket.send(json.dumps({
+                                "acao": "resposta_login", 
+                                "sucesso": False, 
+                                "mensagem": "Desafio inválido"
+                            }).encode('utf-8'))
+                            return
+                        
+                        # Obtém chave pública do usuário
+                        
+                        chave_pub_bytes = database.obter_chave_publica(usuario)
+                        if not chave_pub_bytes:
+                            client_socket.send(json.dumps({
+                                "acao": "resposta_login", 
+                                "sucesso": False, 
+                                "mensagem": "Usuário não tem chave pública"
+                            }).encode('utf-8'))
+                            return
+                        
+                        chave_pub = bytes.fromhex(chave_pub_bytes)
+                        nonce_bytes = bytes.fromhex(nonce_recebido)
+                        if crypto_utils.verificar_assinatura(chave_pub, nonce_bytes, assinatura):
+                            # Login bem-sucedido
+                            self.nonces_pendentes.pop(usuario, None)
+                            
+                            # ... continua com o login normal ...
+                            
+                            usuario_atual = usuario
+                            self.clientes_online[usuario_atual] = client_socket
+                            client_socket.send(json.dumps({
+                                "acao": "resposta_login", 
+                                "sucesso": True
+                            }).encode('utf-8'))
+                            # ... enviar mensagens offline ...
+                        else:
+                            client_socket.send(json.dumps({
+                                "acao": "resposta_login", 
+                                "sucesso": False, 
+                                "mensagem": "Assinatura inválida"
+                            }).encode('utf-8'))
 
             except Exception as e:
                 conectado = False
@@ -105,6 +172,7 @@ class ServidorChat:
         if usuario_atual:
             database.logout_db(usuario_atual)
             self.clientes_online.pop(usuario_atual, None)
+            
         client_socket.close()
 
 if __name__ == "__main__":

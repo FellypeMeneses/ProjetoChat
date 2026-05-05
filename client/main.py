@@ -204,6 +204,16 @@ class ChatApp:
             else:
                 messagebox.showerror("Erro", dados["mensagem"])
                 
+        elif acao == "desafio_login":
+            nonce = dados.get("nonce")
+            # Responde ao desafio com a assinatura
+            
+            self.rede.responder_desafio(
+                self.usuario_tentando_logar, 
+                nonce, 
+                self.chave_privada
+            )
+                
         elif acao == "resposta_exclusao_conta":
             if dados["sucesso"]:
                 messagebox.showinfo("Conta Excluída", "Sua conta foi apagada com sucesso.")

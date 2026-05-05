@@ -1,6 +1,8 @@
 import socket
 import json
 import threading
+from typing import Self
+from client import crypto_utils
 from crypto_session import SessaoCriptografada
 
 class ClienteRede:
@@ -12,6 +14,19 @@ class ClienteRede:
         self.ao_receber_mensagem = None 
         self.sessao = None 
 
+
+    def responder_desafio(self, usuario, nonce, chave_privada):
+        """Assina o nonce com a chave privada"""
+        nonce_bytes = bytes.fromhex(nonce)
+        assinatura = crypto_utils.assinar_mensagem(chave_privada, nonce_bytes)
+        
+        self.enviar({
+            "acao": "resposta_desafio",
+            "usuario": usuario,
+            "nonce": nonce,
+            "assinatura": assinatura.hex()
+        })
+        
     def conectar(self):
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

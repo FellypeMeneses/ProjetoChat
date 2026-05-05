@@ -8,50 +8,33 @@ import crypto_utils
 import os
 import threading
 
-
 class ChatApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Parceiro Chat - Cliente TCP")
         self.root.geometry("450x600")
+        
         self.usuario_logado = None
+        self.usuario_tentando_logar = None
         self.contato_atual = None
-        self.timeout_digitando = None
-        self.tipo_evento = None
         self.timer_expiracao = None
         self.contador_msgs_sessao = 0
         
-    def iniciar_timer_expiracao_sessao(self):
-    #Inicia timer para mostrar quando a sessão vai expirar"""
-        if self.timer_expiracao:
-            self.root.after_cancel(self.timer_expiracao)
-    
-        self.timer_expiracao = self.root.after(55000, self.mostrar_aviso_expiracao)  # 55 segundos
+        # 1. Cria o container principal da interface
+        self.container = tk.Frame(self.root)
+        self.container.pack(expand=True, fill="both")
         
-    def mostrar_aviso_expiracao(self):
-    #Mostra aviso que a sessão vai expirar em 5 segundos"""
-        messagebox.showwarning(
-        "Sessão Expirando",
-        "A sessão criptográfica vai expirar em 5 segundos. Nova chave será gerada automaticamente."
-    )
-        self.root.after(5000, self.forcar_renovacao_sessao)
-        
-    def forcar_renovacao_sessao(self):
-    #Força renovação da sessão"""
-        if hasattr(self.rede, 'sessao') and self.rede.sessao:
-            self.rede._renovar_sessao()
-        # Reiniciar timer
-            self.iniciar_timer_expiracao_sessao()
-        
-        #verifica se ja existe outra chave privada (para manter a mesma identidade em logins futuros)
+        # 2. Carrega as chaves locais (se existirem) para manter a identidade
         self.chave_privada = None
         self.chave_publica_bytes = None
-        
         if os.path.exists("chave_privada.pem"):
-            self.chave_privada = crypto_utils.carregar_chave_privada()
-            self.chave_publica_bytes = crypto_utils.obter_chave_publica_bytes(self.chave_privada.public_key())
-            
-            
+            try:
+                self.chave_privada = crypto_utils.carregar_chave_privada()
+                self.chave_publica_bytes = crypto_utils.obter_chave_publica_bytes(self.chave_privada.public_key())
+            except Exception as e:
+                print(f"Erro ao carregar chave privada: {e}")
+
+        # 3. Conecta ao servidor e estabelece a sessão segura
         self.rede = ClienteRede()
         sucesso, msg = self.rede.conectar()
         if not sucesso:
@@ -59,9 +42,8 @@ class ChatApp:
             self.root.destroy()
             return
             
+        # 4. Define a função de escuta e abre a tela de login
         self.rede.ao_receber_mensagem = self.processar_resposta_servidor
-        self.container = tk.Frame(self.root)
-        self.container.pack(expand=True, fill="both")
         self.abrir_login()
 
     def limpar_container(self):
@@ -85,13 +67,12 @@ class ChatApp:
         self.contato_atual = None
         self.iniciar_timer_expiracao_sessao()
         
-        # ATUALIZAÇÃO: Agora passamos self.solicitar_excluir_conta como o 5º argumento
         self.lista_contatos_box = interface.montar_layout_contatos(
             self.container,
             self.usuario_logado,
             self.pedir_contatos_ao_servidor,
             self.abrir_login,
-            self.solicitar_excluir_conta  # <-- Botão de exclusão de conta
+            self.solicitar_excluir_conta
         )
         self.pedir_contatos_ao_servidor()
         self.lista_contatos_box.bind('<Double-1>', self.abrir_tela_chat)
@@ -115,28 +96,30 @@ class ChatApp:
 
     def enviar_mensagem_texto(self):
         texto = self.ent_mensagem.get()
-        if texto.strip() and self.contato_atual in self.sessoes_e2ee:
-            
+        if texto.strip() and self.contato_atual:
             pacote = {"acao": "enviar_mensagem", "destinatario": self.contato_atual, "conteudo": texto}
             self.rede.enviar(pacote)
             historico.salvar_mensagem(self.usuario_logado, self.contato_atual, "Você", texto)
             self.inserir_texto_no_chat(f"Você: {texto}")
             self.ent_mensagem.delete(0, tk.END)
 
-        # Contar mensagens para renovação
-        self.contador_msgs_sessao += 1
-        if self.contador_msgs_sessao >= 90:  # 90 mensagens (alerta com 10 de folga)
-            self.root.after(0, lambda: messagebox.showwarning(
-                "Mensagens Restantes",
-                f"Mais {100 - self.contador_msgs_sessao} mensagens até renovação da sessão."
-            ))
+            self.contador_msgs_sessao += 1
+            if self.contador_msgs_sessao >= 90:
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "Mensagens Restantes",
+                    f"Mais {100 - self.contador_msgs_sessao} mensagens até renovação da sessão."
+                ))
+
+    def iniciar_timer_expiracao_sessao(self):
+        if self.timer_expiracao:
+            self.root.after_cancel(self.timer_expiracao)
+        self.timer_expiracao = self.root.after(3540000, self.mostrar_aviso_expiracao) # 59 minutos
+
+    def mostrar_aviso_expiracao(self):
+        messagebox.showwarning("Sessão Expirando", "A sessão criptográfica vai expirar em breve.")
 
     def solicitar_excluir_conta(self):
-        """ Nova função para lidar com o botão de deletar conta """
-        confirmacao = messagebox.askyesno(
-            "Excluir Conta",
-            "Tem certeza que deseja excluir sua conta permanentemente?\nEsta ação não pode ser desfeita."
-        )
+        confirmacao = messagebox.askyesno("Excluir Conta", "Tem certeza que deseja excluir sua conta permanentemente?")
         if confirmacao:
             self.rede.enviar({"acao": "excluir_conta"})
 
@@ -150,8 +133,7 @@ class ChatApp:
             texto_limpo = texto_mensagem.replace("Você: ", "", 1).replace(" (editado)", "")
             self.list_mensagens.delete(indice)
             historico.excluir_mensagem_bd(self.usuario_logado, self.contato_atual, "Você", texto_limpo)
-            pacote = {"acao": "excluir_mensagem", "destinatario": self.contato_atual, "conteudo_original": texto_limpo}
-            self.rede.enviar(pacote)
+            self.rede.enviar({"acao": "excluir_mensagem", "destinatario": self.contato_atual, "conteudo_original": texto_limpo})
         else:
             messagebox.showwarning("Bloqueado", "Você só pode apagar as suas próprias mensagens!")
 
@@ -169,8 +151,7 @@ class ChatApp:
                 self.list_mensagens.delete(indice)
                 self.list_mensagens.insert(indice, f"Você: {novo_texto} (editado)")
                 historico.editar_mensagem_bd(self.usuario_logado, self.contato_atual, "Você", texto_original, novo_texto)
-                pacote = {"acao": "editar_mensagem", "destinatario": self.contato_atual, "conteudo_original": texto_original, "conteudo_novo": novo_texto}
-                self.rede.enviar(pacote)
+                self.rede.enviar({"acao": "editar_mensagem", "destinatario": self.contato_atual, "conteudo_original": texto_original, "conteudo_novo": novo_texto})
         else:
             messagebox.showwarning("Bloqueado", "Você só pode editar as suas próprias mensagens!")
 
@@ -183,20 +164,17 @@ class ChatApp:
         user = self.ent_cad_user.get()
         senha = self.ent_cad_pass.get()
         if user and senha:
-            self.rede.enviar({"acao": "registrar", "usuario": user, "senha": senha})
             if not self.chave_privada:
                 priv, pub = crypto_utils.gerar_par_chaves_ecc()
                 self.chave_privada = priv
-                self.chave_publica = pub
                 self.chave_publica_bytes = crypto_utils.obter_chave_publica_bytes(pub)
                 crypto_utils.salvar_chave_privada(priv)
                 
-            # Envia chave pública junto com registro
             self.rede.enviar({
                 "acao": "registrar",
                 "usuario": user,
                 "senha": senha,
-                "chave_publica": self.chave_publica_bytes.hex()  # Envia em hexadecimal
+                "chave_publica": self.chave_publica_bytes.hex()
             })
 
     def solicitar_login(self):
@@ -226,7 +204,6 @@ class ChatApp:
             else:
                 messagebox.showerror("Erro", dados["mensagem"])
                 
-
         elif acao == "resposta_exclusao_conta":
             if dados["sucesso"]:
                 messagebox.showinfo("Conta Excluída", "Sua conta foi apagada com sucesso.")
@@ -238,16 +215,12 @@ class ChatApp:
             if dados["sucesso"]:
                 def atualizar_lista():
                     self.lista_contatos_box.delete(0, tk.END)
-                    for i, contato in enumerate(dados["contatos"]):
+                    for contato in dados["contatos"]:
                         nome = contato['nome_usuario']
                         status_bd = contato['status'].lower()
-                        
-                        icone = "●" 
-                        self.lista_contatos_box.insert(tk.END, f"{nome} - {icone} {status_bd.upper()}")
-                        
                         cor = "#00A884" if status_bd == "online" else "#EF4444"
+                        self.lista_contatos_box.insert(tk.END, f"{nome} - ● {status_bd.upper()}")
                         self.lista_contatos_box.itemconfig(tk.END, fg=cor)
-                        
                 self.root.after(0, atualizar_lista)
 
         elif acao == "nova_mensagem":

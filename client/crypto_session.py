@@ -1,45 +1,32 @@
-from datetime import time
-
-from cryptography.hazmat.primitives.asymmetric import dh
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import hashes, hmac
-from cryptography.hazmat.backends import default_backend
+import time
 import os
 import json
-
-# Parâmetros DH (usar parâmetros padrão seguros)
-
-def gerar_parametros_dh():
-    """Gera parâmetros DH (usar uma vez e reutilizar)"""
-    return dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
-
-# Parâmetros fixos para o servidor (reutilizar)
-
-PARAMETROS_DH = gerar_parametros_dh()
+from cryptography.hazmat.primitives.asymmetric import ec # Mudou de 'dh' para 'ec' (Elliptic Curve)
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import hashes, hmac, serialization
+from cryptography.hazmat.backends import default_backend
 
 class SessaoCriptografada:
     def __init__(self):
         self.chave_aes = None  # Chave 1 (256 bits)
         self.chave_hmac = None # Chave 2 (256 bits)
         self.salt = None
-        self.chave_dh = None
+        self.private_key_dh = None 
         self.contador_mensagens = 0
         self.inicio_sessao = None
         
     def iniciar_handshake_cliente(self):
-        """Cliente inicia DHE com servidor"""
+        """Cliente inicia ECDH com servidor"""
         
-        # Gera par de chaves DH (privada + pública)
-        
-        private_key = PARAMETROS_DH.generate_private_key()
-        public_key = private_key.public_key()
+        # Gera par de chaves usando a Curva Elíptica P-256 (padrão e ultra segura)
+        self.private_key_dh = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        public_key = self.private_key_dh.public_key()
         
         # Gera salt aleatório (32 bytes)
         self.salt = os.urandom(32)
         
         # Retorna chave pública e salt para enviar ao servidor
-        
         public_key_bytes = public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -54,8 +41,8 @@ class SessaoCriptografada:
             backend=default_backend()
         )
         
-        # Calcula chave compartilhada DH
-        chave_compartilhada = private_key.exchange(public_key_servidor)
+        # Calcula chave compartilhada usando o algoritmo ECDH
+        chave_compartilhada = self.private_key_dh.exchange(ec.ECDH(), public_key_servidor)
         
         # Deriva chaves com HKDF
         hkdf = HKDF(
@@ -78,9 +65,9 @@ class SessaoCriptografada:
         """Servidor completa handshake iniciado pelo cliente"""
         self.salt = salt_cliente
         
-        # Gera par de chaves DH do servidor
-        private_key = PARAMETROS_DH.generate_private_key()
-        public_key = private_key.public_key()
+        # Gera par de chaves ECDH do servidor
+        self.private_key_dh = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        public_key = self.private_key_dh.public_key()
         
         # Carrega chave pública do cliente
         public_key_cliente = serialization.load_pem_public_key(
@@ -88,8 +75,8 @@ class SessaoCriptografada:
             backend=default_backend()
         )
         
-        # Calcula chave compartilhada
-        chave_compartilhada = private_key.exchange(public_key_cliente)
+        # Calcula chave compartilhada usando ECDH
+        chave_compartilhada = self.private_key_dh.exchange(ec.ECDH(), public_key_cliente)
         
         # Deriva chaves
         hkdf = HKDF(
@@ -115,24 +102,19 @@ class SessaoCriptografada:
     
     def cifrar_mensagem(self, dados_dict):
         """Cifra e autentica mensagem com AES-GCM + HMAC"""
-        # Converte dict para JSON
         mensagem_json = json.dumps(dados_dict)
         mensagem_bytes = mensagem_json.encode('utf-8')
         
-        # Gera IV aleatório (12 bytes para GCM)
         iv = os.urandom(12)
         
-        # Cifra com AES-GCM
         cipher = Cipher(algorithms.AES(self.chave_aes), modes.GCM(iv), backend=default_backend())
         encryptor = cipher.encryptor()
         texto_cifrado = encryptor.update(mensagem_bytes) + encryptor.finalize()
         
-        # Gera HMAC do texto cifrado + IV
         h = hmac.HMAC(self.chave_hmac, hashes.SHA256(), backend=default_backend())
         h.update(iv + texto_cifrado)
         mac = h.finalize()
         
-        # Retorna pacote
         return {
             "iv": iv.hex(),
             "tag": encryptor.tag.hex(),
@@ -147,7 +129,6 @@ class SessaoCriptografada:
         texto_cifrado = bytes.fromhex(pacote["cifrado"])
         mac_recebido = bytes.fromhex(pacote["mac"])
         
-        # Verifica HMAC primeiro
         h = hmac.HMAC(self.chave_hmac, hashes.SHA256(), backend=default_backend())
         h.update(iv + texto_cifrado)
         try:
@@ -155,28 +136,24 @@ class SessaoCriptografada:
         except:
             raise ValueError("HMAC inválido! Mensagem pode ter sido alterada.")
         
-        # Decifra AES-GCM
         cipher = Cipher(algorithms.AES(self.chave_aes), modes.GCM(iv, tag), backend=default_backend())
         decryptor = cipher.decryptor()
         mensagem_bytes = decryptor.update(texto_cifrado) + decryptor.finalize()
         
-        # Converte JSON de volta para dict
         return json.loads(mensagem_bytes.decode('utf-8'))
     
     def precisa_renovar(self):
         """Verifica se precisa renovar chaves (60 min ou 100 msgs)"""
-        import time
         tempo_passado = time.time() - self.inicio_sessao
         return tempo_passado > 3600 or self.contador_mensagens > 100
     
-    # Adicione este método à classe SessaoCriptografada
-def cifrar_evento(self, evento, dados_extra=None):
-    """Cifra eventos leves como 'digitando'"""
-    msg = {"tipo": evento}
-    if dados_extra:
-        msg.update(dados_extra)
-    return self.cifrar(msg)
+    def cifrar_evento(self, evento, dados_extra=None):
+        """Cifra eventos leves como 'digitando'"""
+        msg = {"tipo": evento}
+        if dados_extra:
+            msg.update(dados_extra)
+        return self.cifrar_mensagem(msg)
 
-def decifrar_evento(self, pacote):
-    """Decifra eventos"""
-    return self.decifrar(pacote)
+    def decifrar_evento(self, pacote):
+        """Decifra eventos"""
+        return self.decifrar_mensagem(pacote)

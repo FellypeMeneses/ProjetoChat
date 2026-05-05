@@ -1,6 +1,6 @@
 import mysql.connector
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 import os
@@ -17,7 +17,7 @@ def derivar_chave_local(senha, salt=None):
     if salt is None:
         salt = os.urandom(32)  # 32 bytes de salt
     
-    kdf = PBKDF2(
+    kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,  # 32 bytes = AES-256
         salt=salt,

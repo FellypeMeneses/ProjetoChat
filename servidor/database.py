@@ -1,10 +1,9 @@
 import mysql.connector
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-import os
 
+# Inicializa o gerador de Hash Argon2
 ph = PasswordHasher()
-
 
 def obter_conexao():
     return mysql.connector.connect(
@@ -14,32 +13,28 @@ def obter_conexao():
         database="chat_db"
     )
 
-# --- FUNÇÕES DE USUÁRIO (agora com argon2)---
-
 def registrar_usuario(nome, senha):
     try:
         conn = obter_conexao()
         cursor = conn.cursor()
         
-        # Usamos LOWER para evitar "Admin" e "admin" como usuários diferentes
+        # 1. Verifica se o utilizador já existe (ignorando maiúsculas/minúsculas)
         cursor.execute("SELECT id FROM usuarios WHERE LOWER(nome_usuario) = LOWER(%s)", (nome,))
         if cursor.fetchone():
-            return False, "Usuário já existe!"
+            return False, "Esse utilizador já existe! Tente outro nome."
         
-        # Gera hash da senha com Argon2 (salt embutido automaticamente)
-        
+        # 2. Gera o hash seguro da senha com Argon2
         hash_senha = ph.hash(senha)
         
+        # 3. Salva no banco de dados na coluna 'senha'
         cursor.execute("INSERT INTO usuarios (nome_usuario, senha, status) VALUES (%s, %s, 'offline')", (nome, hash_senha))
         conn.commit()
         return True, "Cadastro realizado com sucesso!"
     except Exception as e:
-        return False, f"Erro no banco: {e}"
+        return False, f"Erro ao registrar no banco: {e}"
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
-
-# --- NOVA FUNÇÃO: Validar login com Argon2 ---
 
 def validar_login(nome, senha):
     try:
@@ -49,15 +44,12 @@ def validar_login(nome, senha):
         cursor.execute("SELECT * FROM usuarios WHERE nome_usuario = %s", (nome,))
         usuario = cursor.fetchone()
         
-    
         if usuario:
-            #verifica a senha usando Argon2 (comparação segura)
-
+            # Verifica a senha usando o Argon2
             ph.verify(usuario['senha'], senha)
 
-            # Se a senha estiver correta, verificamos se o hash precisa ser atualizado (re-hash) para manter a segurança
-
-            if ph.check_needs_rehash(usuario['senha_hash']):
+            # Verifica se precisa de re-hash
+            if ph.check_needs_rehash(usuario['senha']):
                 novo_hash = ph.hash(senha)
                 cursor.execute("UPDATE usuarios SET senha = %s WHERE id = %s", (novo_hash, usuario['id']))
                 conn.commit()
@@ -65,10 +57,12 @@ def validar_login(nome, senha):
             cursor.execute("UPDATE usuarios SET status = 'online' WHERE id = %s", (usuario['id'],))
             conn.commit()
             return True, usuario
+        else:
+            return False, "Utilizador não encontrado. Verifique o nome introduzido."
     except VerifyMismatchError:
-        return False, "Usuário ou senha incorretos."
+        return False, "Palavra-passe incorreta."
     except Exception as e:
-        return False, str(e)
+        return False, f"Erro interno: {e}"
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
@@ -79,7 +73,7 @@ def logout_db(nome_usuario):
         cursor = conn.cursor()
         cursor.execute("UPDATE usuarios SET status = 'offline' WHERE nome_usuario = %s", (nome_usuario,))
         conn.commit()
-    except Exception as e:
+    except Exception:
         pass
     finally:
         if 'conn' in locals() and conn.is_connected():
@@ -89,7 +83,6 @@ def obter_lista_contatos(usuario_atual):
     try:
         conn = obter_conexao()
         cursor = conn.cursor(dictionary=True)
-        # Seleciona apenas usuários que existem na tabela de usuários
         cursor.execute("SELECT nome_usuario, status FROM usuarios WHERE nome_usuario != %s", (usuario_atual,))
         contatos = cursor.fetchall()
         return True, contatos
@@ -98,8 +91,6 @@ def obter_lista_contatos(usuario_atual):
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
-
-# --- FUNÇÕES DE MENSAGENS OFFLINE ---
 
 def criar_tabela_offline():
     try:
@@ -114,7 +105,7 @@ def criar_tabela_offline():
             )
         ''')
         conn.commit()
-    except Exception as e:
+    except Exception:
         pass
     finally:
         if 'conn' in locals() and conn.is_connected():
@@ -124,7 +115,6 @@ def salvar_offline(remetente, destinatario, conteudo):
     try:
         conn = obter_conexao()
         cursor = conn.cursor()
-        # SÓ salva se o destinatário ainda existir no banco de dados
         cursor.execute("SELECT id FROM usuarios WHERE nome_usuario = %s", (destinatario,))
         if cursor.fetchone():
             cursor.execute("INSERT INTO mensagens_offline (remetente, destinatario, conteudo) VALUES (%s, %s, %s)", 
@@ -138,9 +128,6 @@ def buscar_e_apagar_offline(destinatario):
     try:
         conn = obter_conexao()
         cursor = conn.cursor(dictionary=True)
-        
-        # BUSCA REFINADA: Só pega mensagens de remetentes que ainda existem!
-        # Isso evita que mensagens de "fantasmas" (excluídos) apareçam no chat
         query = """
             SELECT m.* FROM mensagens_offline m
             JOIN usuarios u ON m.remetente = u.nome_usuario
@@ -153,39 +140,21 @@ def buscar_e_apagar_offline(destinatario):
             cursor.execute("DELETE FROM mensagens_offline WHERE destinatario = %s", (destinatario,))
             conn.commit()
         return mensagens
-    except Exception as e:
+    except Exception:
         return []
     finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()
 
-# --- NOVA FUNÇÃO: DELETAR USUÁRIO COMPLETAMENTE ---
-def excluir_usuario_total(nome_usuario):
-    """ Use esta função para apagar um usuário e limpar tudo dele """
-    try:
-        conn = obter_conexao()
-        cursor = conn.cursor()
-        # 1. Apaga mensagens offline dele ou para ele
-        cursor.execute("DELETE FROM mensagens_offline WHERE remetente = %s OR destinatario = %s", (nome_usuario, nome_usuario))
-        # 2. Apaga o usuário
-        cursor.execute("DELETE FROM usuarios WHERE nome_usuario = %s", (nome_usuario,))
-        conn.commit()
-        return True
-    except Exception as e:
-        print(f"Erro ao excluir: {e}")
-        return False
-    finally:
-        conn.close()
-    # Linha 151 aprox.
 def excluir_conta_db(nome_usuario):
-    try: # <--- O código abaixo deste try DEVE estar indentado
+    try:
         conn = obter_conexao()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM usuarios WHERE nome_usuario = %s", (nome_usuario,))
         conn.commit()
         return True, "Conta excluída com sucesso."
-    except Exception as e: # <--- O except deve estar alinhado com o try
+    except Exception as e:
         return False, f"Erro ao excluir conta: {e}"
-    finally: # <--- O finally também alinhado com o try
+    finally:
         if 'conn' in locals() and conn.is_connected():
             conn.close()

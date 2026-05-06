@@ -180,6 +180,7 @@ class ChatApp:
     def solicitar_login(self):
         user = self.ent_login_user.get()
         senha = self.ent_login_pass.get()
+        
         if user and senha:
             self.usuario_tentando_logar = user
             self.rede.enviar({"acao": "login", "usuario": user, "senha": senha})

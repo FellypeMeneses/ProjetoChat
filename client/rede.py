@@ -63,9 +63,11 @@ class ClienteRede:
             return False, f"Falha na conexão: {e}"
 
     def enviar(self, dicionario_dados):
-        if self.conectado:
+        if self.conectado and self.sessao and self.sessao.handshake_completo:
             try:
                 # Envia o JSON puro para o servidor poder rotear a mensagem
+                pacote_cifrado = self.sessao.cifrar(json.dumps(dicionario_dados))
+                self.socket.send(json.dumps(pacote_cifrado).encode('utf-8'))
                 mensagem = json.dumps(dicionario_dados)
                 self.socket.send(mensagem.encode('utf-8'))
             except Exception as e:
@@ -77,10 +79,16 @@ class ClienteRede:
                 mensagem_bytes = self.socket.recv(8192)
                 if not mensagem_bytes: break
                 
-                dados = json.loads(mensagem_bytes.decode('utf-8'))
+                dados_recebidos = json.loads(mensagem_bytes.decode('utf-8'))
+                if "iv" in dados_recebidos and "tag" in dados_recebidos and "cifrado" in dados_recebidos and "mac" in dados_recebidos:
+                    texto_decifrado = self.sessao.decifrar(dados_recebidos)
+                    dados = json.loads(texto_decifrado)
+                else:
+                    dados = json.loads(mensagem_bytes.decode('utf-8'))
                 if self.ao_receber_mensagem:
                     self.ao_receber_mensagem(dados)
             except:
+                print("Conexão perdida com o servidor.")
                 self.conectado = False
                 break
         if self.socket: self.socket.close()

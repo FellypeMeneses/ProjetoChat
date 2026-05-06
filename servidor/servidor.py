@@ -15,6 +15,8 @@ class ServidorChat:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.host, self.porta))
         self.server_socket.listen()
+        self.sessoes_clientes = {}
+        
         print(f"--- [SERVIDOR] Ativo em {self.host}:{self.porta} ---")
 
         self.nonces_pendentes = {}  # usuario -> nonce
@@ -24,6 +26,7 @@ class ServidorChat:
             client_socket, endereco = self.server_socket.accept()
             thread = threading.Thread(target=self.lidar_com_cliente, args=(client_socket, endereco))
             thread.start()
+        self.sessoes_clientes[usuario_atual] = sessao_segura
 
     def lidar_com_cliente(self, client_socket, endereco):
         usuario_atual = None

@@ -4,6 +4,8 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 import os
 
+from servidor.database import obter_conexao
+
 #ECC (usar por ser mais leve e rápido que RSA para chat)
 
 def gerar_par_chaves_ecc():
@@ -13,6 +15,20 @@ def gerar_par_chaves_ecc():
     private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
     public_key = private_key.public_key()
     return private_key, public_key
+
+def obter_chave_publica(nome_usuario):
+    try:
+        conn = obter_conexao()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT chave_publica FROM usuarios WHERE nome_usuario = %s", (nome_usuario,))
+        resultado = cursor.fetchone()
+        return resultado['chave_publica'] if resultado else None
+    except Exception as e:
+        print(f"Erro: {e}")
+        return None
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
 
 def salvar_chave_privada(private_key, arquivo="chave_privada.pem", senha=None):
     

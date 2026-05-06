@@ -1,85 +1,63 @@
-from cryptography.hazmat.primitives.asymmetric import rsa, ec
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 import os
 
-from servidor.database import obter_conexao
+# ==========================================
+# FUNÇÕES DE USO PRINCIPAL PELO SERVIDOR
+# ==========================================
 
-#ECC (usar por ser mais leve e rápido que RSA para chat)
+def carregar_chave_publica_bytes(public_key_bytes):
+    """
+    Pega na string/bytes da chave pública (vinda do banco de dados) 
+    e transforma num objeto de chave Ed25519 que o Python consegue usar.
+    """
+    return serialization.load_pem_public_key(
+        public_key_bytes,
+        backend=default_backend()
+    )
 
-def gerar_par_chaves_ecc():
-    
-    #Gera par de chaves ECC (Curve25519)
-    
-    private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+def verificar_assinatura(public_key, mensagem_bytes, assinatura):
+    """
+    Verifica se a assinatura digital enviada pelo cliente é válida para a mensagem (nonce).
+    """
+    try:
+        # Tenta validar. Se a assinatura for falsa ou a mensagem foi alterada, 
+        # a biblioteca cryptography gera um erro (Exception).
+        public_key.verify(assinatura, mensagem_bytes)
+        return True
+    except Exception as e:
+        print(f"Aviso de Segurança: Falha na verificação da assinatura. Detalhe: {e}")
+        return False
+
+# ==========================================
+# FUNÇÕES AUXILIARES E DE PADRONIZAÇÃO
+# (Mantidas para compatibilidade e caso o servidor precise gerar chaves no futuro)
+# ==========================================
+
+def gerar_par_chaves_ed25519():
+    """Gera um novo par de chaves usando o algoritmo Ed25519."""
+    private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
     return private_key, public_key
 
-def obter_chave_publica(nome_usuario):
-    try:
-        conn = obter_conexao()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT chave_publica FROM usuarios WHERE nome_usuario = %s", (nome_usuario,))
-        resultado = cursor.fetchone()
-        return resultado['chave_publica'] if resultado else None
-    except Exception as e:
-        print(f"Erro: {e}")
-        return None
-    finally:
-        if 'conn' in locals() and conn.is_connected():
-            conn.close()
-
-def salvar_chave_privada(private_key, arquivo="chave_privada.pem", senha=None):
-    
-    #Salva chave privada criptografada (opcional)
-    if senha:
-        encryption = serialization.BestAvailableEncryption(senha.encode())
-    else:
-        encryption = serialization.NoEncryption()
-    
-    pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=encryption
-    )
-    with open(arquivo, "wb") as f:
-        f.write(pem)
-
-def carregar_chave_privada(arquivo="chave_privada.pem", senha=None):
-    
-    """Carrega chave privada do arquivo"""
-    with open(arquivo, "rb") as f:
-        pem_data = f.read()
-    
-    if senha:
-        return serialization.load_pem_private_key(pem_data, password=senha.encode(), backend=default_backend())
-    else:
-        return serialization.load_pem_private_key(pem_data, password=None, backend=default_backend())
-
 def obter_chave_publica_bytes(public_key):
-    """Converte chave pública para bytes (para enviar ao servidor)"""
+    """Converte o objeto da chave pública para o formato PEM (texto/bytes)."""
     return public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
 
 def assinar_mensagem(private_key, mensagem_bytes):
-    """Assina uma mensagem com a chave privada (ECDSA)"""
-    signature = private_key.sign(
-        mensagem_bytes,
-        ec.ECDSA(hashes.SHA256())
-    )
-    return signature
+    """Assina uma mensagem usando a chave privada Ed25519."""
+    return private_key.sign(mensagem_bytes)
 
-def verificar_assinatura(public_key, mensagem_bytes, assinatura):
-    """Verifica assinatura com chave pública"""
-    try:
-        public_key.verify(
-            assinatura,
-            mensagem_bytes,
-            ec.ECDSA(hashes.SHA256())
-        )
-        return True
-    except:
-        return False
+def carregar_chave_privada(arquivo="chave_privada.pem", senha=None):
+    """Lê uma chave privada de um arquivo PEM no disco."""
+    with open(arquivo, "rb") as f:
+        pem_data = f.read()
+    return serialization.load_pem_private_key(
+        pem_data, 
+        password=senha.encode() if senha else None, 
+        backend=default_backend()
+    )

@@ -4,9 +4,15 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import hashes, hmac, serialization
 from cryptography.hazmat.backends import default_backend
+import time
+import random
 
 class SessaoP2P:
     def __init__(self):
+        self.contador_mensagens = 0
+        self.inicio_sessao = None
+        self.limite_tempo = 3600 
+        self.limite_msgs = 100
         self.chave_aes = None
         self.chave_hmac = None
         self.salt = None
@@ -17,6 +23,18 @@ class SessaoP2P:
         self.aguardando = False 
 
     # --- PASSO 1: O INICIADOR ---
+    def configurar_limites_aleatorios(self):
+        """Requisito: Aleatório entre 30-60 min e 50-100 msgs [cite: 81, 82]"""
+        self.limite_tempo = random.randint(1800, 3600)
+        self.limite_msgs = random.randint(50, 100)
+        self.inicio_sessao = time.time()
+        self.contador_mensagens = 0
+
+    def precisa_renovar(self):
+        """Verifica se a sessão P2P atingiu os limites efêmeros [cite: 74, 146]"""
+        if not self.handshake_completo or self.inicio_sessao is None: return False
+        tempo_passado = time.time() - self.inicio_sessao
+        return tempo_passado > self.limite_tempo or self.contador_mensagens >= self.limite_msgs
     def iniciar_handshake_iniciador(self):
         """O Cliente A gera a sua chave efêmera e cria um Token Único."""
         self.id_sessao = os.urandom(8).hex() 

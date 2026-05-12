@@ -89,6 +89,22 @@ def buscar_e_apagar_offline(destinatario):
         return []
     finally:
         conn.close()
+def obter_chave_publica(nome_usuario):
+    """Busca a chave pública do utilizador no banco de dados para o desafio de login."""
+    try:
+        conn = obter_conexao()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT chave_publica FROM usuarios WHERE nome_usuario = %s", (nome_usuario,))
+        user = cursor.fetchone()
+        if user:
+            return user['chave_publica']
+        return None
+    except Exception as e:
+        print(f"Erro ao obter chave pública: {e}")
+        return None
+    finally:
+        if 'conn' in locals() and conn.is_connected():
+            conn.close()
 def obter_lista_contatos(usuario_atual):
     """Busca contatos ordenando pelos Online primeiro para um visual organizado"""
     try:

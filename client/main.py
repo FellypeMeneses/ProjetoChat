@@ -1,214 +1,167 @@
 import tkinter as tk
-from tkinter import messagebox, simpledialog
-import interface
+from tkinter import messagebox
+import interface, crypto_utils, crypto_p2p, historico, os, threading, json
 from rede import ClienteRede
-import historico
-import crypto_utils
-import crypto_p2p # Importamos a nova lógica de Ponta-a-Ponta
-import os
-import sys
-import traceback
+from crypto_session import SessaoCriptografada
 
 class ChatApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Parceiro Chat - Cliente Seguro")
-        self.root.geometry("450x600")
+        self.root.title("Parceiro Chat - Seguro")
+        self.root.geometry("650x700")
         
         self.usuario_logado = None
         self.usuario_tentando_logar = None
         self.contato_atual = None
-        
-        # Dicionário que guarda os segredos matemáticos com cada amigo
-        self.sessoes_p2p = {} 
+        self.chave_aes_local = None 
+        self.sessao_server = None 
         
         self.container = tk.Frame(self.root)
         self.container.pack(expand=True, fill="both")
         
-        self.chave_privada = None
-        self.carregar_identidade()
+        threading.Thread(target=self.iniciar_conexao, daemon=True).start()
 
+    def iniciar_conexao(self):
+        self.carregar_identidade()
         self.rede = ClienteRede()
-        sucesso, msg = self.rede.conectar()
-        
-        if not sucesso:
-            print(f"\n❌ ERRO DE REDE: {msg}") 
-            self.root.withdraw()
-            messagebox.showerror("Erro de Conexão", f"Falha ao conectar.\nDetalhe: {msg}")
-            self.root.destroy()
-            sys.exit(1)
-            
         self.rede.ao_receber_mensagem = self.processar_resposta_servidor
-        self.abrir_login()
+        sucesso, _ = self.rede.conectar()
+        if sucesso:
+            self.sessao_server = self.rede.sessao
+            self.root.after(0, self.abrir_login)
 
     def carregar_identidade(self):
-        if os.path.exists("chave_privada.pem"):
-            try: self.chave_privada = crypto_utils.carregar_chave_privada()
-            except Exception as e: print(f"Aviso: {e}")
+        if not os.path.exists("chave_privada.pem"):
+            priv, _ = crypto_utils.gerar_par_chaves_ed25519()
+            crypto_utils.salvar_chave_privada(priv, "chave_privada.pem")
+        self.chave_privada = crypto_utils.carregar_chave_privada("chave_privada.pem")
 
-    # (Funções de Layout omitidas aqui para focar na lógica de Criptografia)
     def abrir_login(self):
-        for widget in self.container.winfo_children(): widget.destroy()
-        self.ent_login_user, self.ent_login_pass = interface.montar_layout_login(self.container, self.solicitar_login, self.abrir_cadastro)
+        for w in self.container.winfo_children(): w.destroy()
+        self.ent_user, self.ent_pass = interface.montar_layout_login(self.container, self.tentar_login, self.abrir_cadastro)
 
     def abrir_cadastro(self):
-        for widget in self.container.winfo_children(): widget.destroy()
-        self.ent_cad_user, self.ent_cad_pass = interface.montar_layout_cadastro(self.container, self.solicitar_registro, self.abrir_login)
+        for w in self.container.winfo_children(): w.destroy()
+        self.ent_user, self.ent_pass = interface.montar_layout_cadastro(self.container, self.tentar_cadastro, self.abrir_login)
 
-    def tela_principal(self):
-        for widget in self.container.winfo_children(): widget.destroy()
-        self.lista_contatos_box = interface.montar_layout_contatos(
-            self.container, self.usuario_logado, 
-            lambda: self.rede.enviar({"acao": "pedir_contatos"}),
-            self.abrir_login, lambda: self.rede.enviar({"acao": "excluir_conta"})
-        )
-        self.rede.enviar({"acao": "pedir_contatos"})
-        self.lista_contatos_box.bind('<Double-1>', self.abrir_tela_chat)
-
-    def abrir_tela_chat(self, event=None):
-        selecao = self.lista_contatos_box.curselection()
-        if not selecao: return
-        self.contato_atual = self.lista_contatos_box.get(selecao[0]).split(" - ")[0].strip()
-        
-        for widget in self.container.winfo_children(): widget.destroy()
-        self.list_mensagens, self.ent_mensagem = interface.montar_layout_chat(
-            self.container, self.contato_atual, self.enviar_mensagem_texto,
-            self.tela_principal, lambda: print("Excluir"), lambda: print("Editar")
-        )
-        
-        for rem, msg in historico.carregar_mensagens(self.usuario_logado, self.contato_atual):
-            self.list_mensagens.insert(tk.END, f"{rem}: {msg}")
-
-    # --- LÓGICA DE REGISTO E LOGIN ---
-    def solicitar_login(self):
-        user, senha = self.ent_login_user.get(), self.ent_login_pass.get()
+    def tentar_login(self):
+        user, senha = self.ent_user.get(), self.ent_pass.get()
         if user and senha:
             self.usuario_tentando_logar = user
-            self.rede.enviar({"acao": "login_desafio", "usuario": user})
+            self.chave_aes_local, _ = historico.derivar_chave_local(senha)
+            pacote = self.sessao_server.cifrar_mensagem({"acao": "login", "usuario": user, "senha": senha})
+            self.rede.enviar(pacote)
 
-    def solicitar_registro(self):
-        user, senha = self.ent_cad_user.get(), self.ent_cad_pass.get()
+    def tentar_cadastro(self):
+        user, senha = self.ent_user.get(), self.ent_pass.get()
         if user and senha:
-            priv, pub = crypto_utils.gerar_par_chaves_ed25519()
-            self.chave_privada = priv
-            crypto_utils.salvar_chave_privada(priv)
-            self.rede.enviar({"acao": "registrar", "usuario": user, "senha": senha, "chave_publica": crypto_utils.obter_chave_publica_bytes(pub).hex()})
+            pub = crypto_utils.obter_chave_publica_bytes(self.chave_privada.public_key()).hex()
+            pacote = self.sessao_server.cifrar_mensagem({"acao": "registrar", "usuario": user, "senha": senha, "chave_publica": pub})
+            self.rede.enviar(pacote)
 
-    # --- LÓGICA DE MENSAGENS COM P2P ---
-    def enviar_mensagem_texto(self):
-        texto = self.ent_mensagem.get()
-        if texto.strip() and self.contato_atual:
-            
-            # Verifica se já temos o segredo matemático com este contato
-            if self.contato_atual not in self.sessoes_p2p or not self.sessoes_p2p[self.contato_atual].handshake_completo:
-                # Se não temos, cria a sessão e inicia o aperto de mão
-                sessao = crypto_p2p.SessaoP2P()
-                self.sessoes_p2p[self.contato_atual] = sessao
-                pub_bytes, salt = sessao.iniciar_handshake_iniciador()
-                
-                self.rede.enviar({
-                    "acao": "p2p_handshake",
-                    "destinatario": self.contato_atual,
-                    "public_key": pub_bytes.hex(),
-                    "salt": salt.hex()
-                })
-                self.list_mensagens.insert(tk.END, "🔒 Negociando chaves seguras... Aguarde 1 segundo e envie novamente.")
-                return
-
-            # Se já temos o segredo, ciframos o texto e enviamos ao servidor
-            pacote_cifrado = self.sessoes_p2p[self.contato_atual].cifrar_mensagem(texto)
-            self.rede.enviar({"acao": "enviar_mensagem", "destinatario": self.contato_atual, "conteudo": pacote_cifrado})
-            
-            historico.salvar_mensagem(self.usuario_logado, self.contato_atual, "Você", texto)
-            self.list_mensagens.insert(tk.END, f"Você: {texto}")
-            self.ent_mensagem.delete(0, tk.END)
-
-    def tratar_chegada_mensagem(self, dados):
-        remetente = dados.get("remetente")
-        pacote_cifrado = dados.get("conteudo")
+    # --- TELA PRINCIPAL (CORRIGIDA) ---
+    def tela_principal(self):
+        for w in self.container.winfo_children(): w.destroy()
         
-        # Desempacota e decifra o texto usando o segredo partilhado
-        if remetente in self.sessoes_p2p and self.sessoes_p2p[remetente].handshake_completo:
-            try:
-                texto_decifrado = self.sessoes_p2p[remetente].decifrar_mensagem(pacote_cifrado)
-                historico.salvar_mensagem(self.usuario_logado, remetente, remetente, texto_decifrado)
-                if self.contato_atual == remetente:
-                    self.root.after(0, lambda: self.list_mensagens.insert(tk.END, f"{remetente}: {texto_decifrado}"))
-            except Exception as e:
-                print(f"Erro de Segurança: Mensagem de {remetente} foi adulterada. Erro: {e}")
-        else:
-            print(f"Aviso: Mensagem recebida de {remetente} sem handshake P2P anterior.")
+        # 1. Header (Laranja)
+        header = tk.Frame(self.container, bg="#FF8C00", height=60)
+        header.pack(side="top", fill="x")
+        tk.Label(header, text=f"👤 {self.usuario_logado}", fg="white", bg="#FF8C00", font=("Arial", 12, "bold")).pack(side="left", padx=20)
 
-    # --- RESPOSTAS DO SERVIDOR ---
-    def processar_resposta_servidor(self, dados):
-        acao = dados.get("acao")
+        # 2. Barra Lateral de Contatos (Esquerda)
+        self.frame_lista = tk.Frame(self.container, width=200, bg="#F0F2F5")
+        self.frame_lista.pack(side="left", fill="y")
+        self.lista_contatos = tk.Listbox(self.frame_lista, bd=0, bg="#F0F2F5", font=("Arial", 10))
+        self.lista_contatos.pack(fill="both", expand=True, padx=5, pady=5)
+        self.lista_contatos.bind('<<ListboxSelect>>', self.selecionar_contato)
+
+        # 3. Frame do Chat (Direita) - Definir PRIMEIRO para evitar AttributeError
+        self.frame_chat = tk.Frame(self.container, bg="#121212")
+        self.frame_chat.pack(side="right", fill="both", expand=True)
         
-        # --- ROTEAMENTO DO HANDSHAKE P2P ---
-        if acao == "p2p_handshake":
-            # Passo 2: Recebemos o pedido de handshake, geramos resposta
-            remetente = dados.get("remetente")
-            pub_remota = bytes.fromhex(dados.get("public_key"))
-            salt = bytes.fromhex(dados.get("salt"))
-            
-            sessao = crypto_p2p.SessaoP2P()
-            self.sessoes_p2p[remetente] = sessao
-            pub_local = sessao.responder_handshake(pub_remota, salt)
-            
-            self.rede.enviar({
-                "acao": "p2p_handshake_resposta",
-                "destinatario": remetente,
-                "public_key": pub_local.hex()
-            })
+        # IMPORTANTE: Definir self.chat_display ANTES de qualquer comando que o use
+        self.chat_display = tk.Text(self.frame_chat, state="disabled", bg="#121212", fg="white", font=("Arial", 11), padx=10, pady=10, bd=0)
+        self.chat_display.pack(fill="both", expand=True)
+        
+        # Tags de Bolha
+        self.chat_display.tag_config("eu", justify="right", foreground="#DCF8C6")
+        self.chat_display.tag_config("outro", justify="left", foreground="#FFFFFF")
 
-        elif acao == "p2p_handshake_resposta":
-            # Passo 3: O iniciador recebe a resposta e finaliza a matemática
-            remetente = dados.get("remetente")
-            pub_remota = bytes.fromhex(dados.get("public_key"))
-            if remetente in self.sessoes_p2p:
-                self.sessoes_p2p[remetente].finalizar_handshake_iniciador(pub_remota)
-                if self.contato_atual == remetente:
-                    self.root.after(0, lambda: self.list_mensagens.insert(tk.END, "✅ Chat Seguro estabelecido! Pode enviar."))
+        self.input_msg = tk.Entry(self.frame_chat, bg="#2c2c2c", fg="white", insertbackground="white", bd=0)
+        self.input_msg.pack(fill="x", side="bottom", padx=10, pady=10, ipady=8)
+        self.input_msg.bind("<Return>", lambda e: self.enviar_mensagem_p2p())
 
-        elif acao == "erro_p2p":
-            self.root.after(0, lambda: messagebox.showwarning("Aviso de Segurança", dados.get("mensagem")))
+        # Solicita contatos ao servidor
+        self.rede.enviar(self.sessao_server.cifrar_mensagem({"acao": "obter_contatos"}))
 
-        # --- EVENTOS GERAIS ---
-        elif acao == "desafio_login":
-            nonce = dados.get("nonce")
-            if self.chave_privada: self.rede.responder_desafio(self.usuario_tentando_logar, nonce, self.chave_privada)
+    def selecionar_contato(self, event):
+        selecao = self.lista_contatos.curselection()
+        if selecao:
+            # Pegar o nome limpando o ícone ●
+            nome_raw = self.lista_contatos.get(selecao[0])
+            self.contato_atual = nome_raw[4:].split(" - ")[0].strip()
             
-        elif acao == "resposta_login":
-            if dados["sucesso"]:
+            # Carregar Histórico
+            self.chat_display.config(state="normal")
+            self.chat_display.delete(1.0, tk.END)
+            self.chat_display.insert(tk.END, f"--- Conversa com {self.contato_atual} ---\n\n")
+            
+            mensagens = historico.carregar_historico_local(self.usuario_logado, self.contato_atual, self.chave_aes_local)
+            for m in mensagens:
+                tag = "eu" if m['remetente'] == self.usuario_logado else "outro"
+                self.chat_display.insert(tk.END, f"{m['remetente']}: {m['texto']}\n\n", tag)
+            
+            self.chat_display.config(state="disabled")
+            self.chat_display.see(tk.END)
+
+    def enviar_mensagem_p2p(self):
+        texto = self.input_msg.get().strip()
+        if not texto or not self.contato_atual: return
+        self.input_msg.delete(0, tk.END)
+
+        # Exibe e Salva
+        self.registrar_e_exibir(self.contato_atual, texto, self.usuario_logado)
+
+        # Camada 1 para o servidor
+        pacote = self.sessao_server.cifrar_mensagem({
+            "acao": "enviar_mensagem", "destinatario": self.contato_atual, "conteudo": texto
+        })
+        self.rede.enviar(pacote)
+
+    def registrar_e_exibir(self, contato, texto, remetente):
+        historico.salvar_mensagem_protegida(self.usuario_logado, contato, remetente, texto, self.chave_aes_local)
+        
+        # Garante que o componente existe antes de atualizar
+        if hasattr(self, 'chat_display'):
+            self.chat_display.config(state="normal")
+            tag = "eu" if remetente == self.usuario_logado else "outro"
+            self.chat_display.insert(tk.END, f"{remetente}: {texto}\n\n", tag)
+            self.chat_display.config(state="disabled")
+            self.chat_display.see(tk.END)
+
+    def processar_resposta_servidor(self, pacote):
+        try:
+            dados = self.sessao_server.decifrar_mensagem(pacote)
+            acao = dados.get("acao")
+            if acao == "resposta_login" and dados.get("sucesso"):
                 self.usuario_logado = self.usuario_tentando_logar
                 self.root.after(0, self.tela_principal)
-            else:
-                self.root.after(0, lambda: messagebox.showerror("Erro de Login", dados.get("mensagem")))
+            elif acao == "nova_mensagem":
+                self.root.after(0, lambda: self.registrar_e_exibir(dados['remetente'], dados['conteudo'], dados['remetente']))
+            elif acao == "resposta_contatos":
+                self.root.after(0, lambda: self.atualizar_lista(dados['contatos']))
+        except Exception as e: print(f"Erro: {e}")
 
-        elif acao == "resposta_registro":
-            if dados["sucesso"]: self.root.after(0, self.abrir_login)
-            self.root.after(0, lambda: messagebox.showinfo("Registro", dados["mensagem"]))
-
-        elif acao == "nova_mensagem":
-            self.tratar_chegada_mensagem(dados)
-            
-        elif acao == "resposta_contatos":
-            if dados.get("sucesso") and hasattr(self, 'lista_contatos_box'):
-                def atualizar_lista():
-                    self.lista_contatos_box.delete(0, tk.END)
-                    for contato in dados["contatos"]:
-                        nome = contato['nome_usuario']
-                        status_bd = contato.get('status', 'offline').lower()
-                        cor = "#00A884" if status_bd == "online" else "#EF4444"
-                        self.lista_contatos_box.insert(tk.END, f"{nome} - ● {status_bd.upper()}")
-                        self.lista_contatos_box.itemconfig(tk.END, fg=cor)
-                self.root.after(0, atualizar_lista)
+    def atualizar_lista(self, contatos):
+        self.lista_contatos.delete(0, tk.END)
+        for c in contatos:
+            if c['nome_usuario'] != self.usuario_logado:
+                status = "●" if c['status'].lower() == 'online' else "○"
+                cor = "#00FF7F" if status == "●" else "#808080"
+                self.lista_contatos.insert(tk.END, f" {status}  {c['nome_usuario'].upper()}")
+                self.lista_contatos.itemconfig(tk.END, fg=cor)
 
 if __name__ == "__main__":
-    try:
-        root = tk.Tk()
-        app = ChatApp(root)
-        root.mainloop()
-    except Exception as e:
-        print("\n" + "="*50)
-        traceback.print_exc()
-        input("Pressione ENTER para fechar o terminal...")
+    root = tk.Tk()
+    app = ChatApp(root)
+    root.mainloop()

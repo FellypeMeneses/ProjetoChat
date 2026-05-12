@@ -12,33 +12,50 @@ class SessaoP2P:
         self.salt = None
         self.private_key_ecdh = None
         self.handshake_completo = False
-    
+        self.id_sessao = None
+        # CORREÇÃO CRÍTICA: Variável de estado adicionada para sincronizar o handshake
+        self.aguardando = False 
+
     # --- PASSO 1: O INICIADOR ---
     def iniciar_handshake_iniciador(self):
-        """O Cliente A gera a sua chave efêmera (temporária) e o Salt."""
+        """O Cliente A gera a sua chave efêmera e cria um Token Único."""
+        self.id_sessao = os.urandom(8).hex() 
         self.private_key_ecdh = ec.generate_private_key(ec.SECP256R1(), default_backend())
         self.salt = os.urandom(32)
+        
+        # Bloqueia a sessão enquanto aguarda a resposta do destinatário
+        self.aguardando = True 
         
         pub_bytes = self.private_key_ecdh.public_key().public_bytes(
             encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        return pub_bytes, self.salt
+        return self.id_sessao, pub_bytes, self.salt
     
-    def finalizar_handshake_iniciador(self, pub_remota_bytes):
-        """O Cliente A recebe a chave do Cliente B e cria o segredo matemático."""
+    def finalizar_handshake_iniciador(self, pub_remota_bytes, id_sessao_recebido):
+        """Verifica o Token antes de concluir a matemática."""
+        if self.id_sessao and id_sessao_recebido != self.id_sessao:
+            raise ValueError("ID de sessão incompatível. Ignorando pacote atrasado.")
+            
         pub_remota = serialization.load_pem_public_key(pub_remota_bytes, backend=default_backend())
         chave_compartilhada = self.private_key_ecdh.exchange(ec.ECDH(), pub_remota)
         
         hkdf = HKDF(algorithm=hashes.SHA256(), length=64, salt=self.salt, info=b"p2p-chat", backend=default_backend())
         chaves = hkdf.derive(chave_compartilhada)
         self.chave_aes, self.chave_hmac = chaves[:32], chaves[32:]
+        
         self.handshake_completo = True
+        self.aguardando = False # Liberta o estado para permitir o envio de mensagens
 
     # --- PASSO 2: O RECEPTOR ---
-    def responder_handshake(self, pub_remota_bytes, salt):
-        """O Cliente B recebe a chave de A, gera a sua própria chave e cria o segredo."""
+    def responder_handshake(self, pub_remota_bytes, salt, id_sessao_recebido):
+        """O Cliente B adota o Token de A e gera a resposta."""
+        self.id_sessao = id_sessao_recebido
         self.salt = salt
         self.private_key_ecdh = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        
+        # O recetor não aguarda, pois finaliza a sua parte no ato
+        self.aguardando = False 
+        
         pub_local_bytes = self.private_key_ecdh.public_key().public_bytes(
             encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
@@ -51,11 +68,10 @@ class SessaoP2P:
         self.chave_aes, self.chave_hmac = chaves[:32], chaves[32:]
         self.handshake_completo = True
         
-        return pub_local_bytes
+        return self.id_sessao, pub_local_bytes
 
     # --- CRIPTOGRAFIA ---
     def cifrar_mensagem(self, texto):
-        """Cifra a mensagem com AES-GCM e protege-a com HMAC (Confidencialidade + Integridade)."""
         if not self.handshake_completo: raise ValueError("Handshake incompleto")
         iv = os.urandom(12)
         cipher = Cipher(algorithms.AES(self.chave_aes), modes.GCM(iv), backend=default_backend())
@@ -68,16 +84,22 @@ class SessaoP2P:
         return {"iv": iv.hex(), "tag": encryptor.tag.hex(), "cifrado": cifrado.hex(), "mac": h.finalize().hex()}
 
     def decifrar_mensagem(self, pacote):
-        """Decifra o pacote recebido verificando se a mensagem foi adulterada."""
         if not self.handshake_completo: raise ValueError("Handshake incompleto")
-        iv = bytes.fromhex(pacote["iv"])
-        tag = bytes.fromhex(pacote["tag"])
-        cifrado = bytes.fromhex(pacote["cifrado"])
-        mac_recebido = bytes.fromhex(pacote["mac"])
-        
-        h = hmac.HMAC(self.chave_hmac, hashes.SHA256(), backend=default_backend())
-        h.update(iv + cifrado)
-        h.verify(mac_recebido) # Se alguém adulterou a mensagem, o código para aqui com um erro.
-        
-        cipher = Cipher(algorithms.AES(self.chave_aes), modes.GCM(iv, tag), backend=default_backend())
-        return (cipher.decryptor().update(cifrado) + cipher.decryptor().finalize()).decode('utf-8')
+        try:
+            # Converte as strings hexadecimais de volta para bytes
+            iv = bytes.fromhex(pacote["iv"])
+            tag = bytes.fromhex(pacote["tag"])
+            cifrado = bytes.fromhex(pacote["cifrado"])
+            mac_recebido = bytes.fromhex(pacote["mac"])
+            
+            # Verificação do MAC (Integridade e Autenticidade) [cite: 18, 48]
+            h = hmac.HMAC(self.chave_hmac, hashes.SHA256(), backend=default_backend())
+            h.update(iv + cifrado)
+            h.verify(mac_recebido) # Se falhar aqui, gera a exceção que você viu no terminal
+            
+            # Decifragem AES-256 GCM [cite: 12, 52]
+            cipher = Cipher(algorithms.AES(self.chave_aes), modes.GCM(iv, tag), backend=default_backend())
+            decryptor = cipher.decryptor()
+            return (decryptor.update(cifrado) + decryptor.finalize()).decode('utf-8')
+        except Exception as e:
+            raise ValueError(f"Falha na integridade: {str(e)}")

@@ -13,24 +13,14 @@ class ClienteRede:
         self.ao_receber_mensagem = None 
         self.sessao = None 
 
-    def responder_desafio(self, usuario, nonce, chave_privada):
-        """Assina o desafio do servidor e envia a resposta."""
-        nonce_bytes = bytes.fromhex(nonce)
-        assinatura = crypto_utils.assinar_mensagem(chave_privada, nonce_bytes)
-        self.enviar({
-            "acao": "resposta_desafio",
-            "usuario": usuario,
-            "nonce": nonce,
-            "assinatura": assinatura.hex()
-        })
-        
     def conectar(self):
-        """Tenta estabelecer a conexão inicial e o handshake criptográfico com o servidor."""
+        """Estabelece a conexão inicial e o handshake DHE"""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((self.host, self.porta))
             
             self.sessao = SessaoCriptografada()
+            # Passo 1: Inicia negociação Diffie-Hellman
             pub_cliente, salt = self.sessao.iniciar_handshake_cliente()
             
             handshake_msg = {
@@ -38,69 +28,59 @@ class ClienteRede:
                 "public_key": pub_cliente.hex(),
                 "salt": salt.hex()
             }
-            # Envia a chave pública do cliente para o servidor
-            self.socket.send(json.dumps(handshake_msg).encode('utf-8'))
+            # Envia com delimitador \n para o servidor identificar o fim do pacote
+            self.socket.sendall((json.dumps(handshake_msg) + "\n").encode('utf-8'))
             
+            # Recebe resposta do servidor
             resposta_bytes = self.socket.recv(8192)
             if not resposta_bytes:
-                return False, "Servidor não respondeu durante o handshake."
+                return False, "Servidor não respondeu."
                 
-            dados_res = json.loads(resposta_bytes.decode('utf-8'))
+            # Decodifica removendo possíveis espaços ou quebras de linha
+            resposta_texto = resposta_bytes.decode('utf-8').strip()
+            if not resposta_texto:
+                 return False, "Resposta vazia do servidor."
+
+            dados_res = json.loads(resposta_texto)
             if dados_res.get("acao") == "handshake_resposta":
                 pub_servidor = bytes.fromhex(dados_res['public_key_servidor'])
+                # Finaliza a derivação das Chaves 1 e 2 via HKDF
                 self.sessao.finalizar_handshake_cliente(pub_servidor)
                 self.conectado = True
+                
+                threading.Thread(target=self.ouvir_servidor, daemon=True).start()
+                return True, "Conectado!"
             
-            # Inicia uma thread (processo paralelo) para ficar sempre a ouvir o servidor
-            thread_receber = threading.Thread(target=self.ouvir_servidor)
-            thread_receber.daemon = True
-            thread_receber.start()
-            
-            return True, "Conectado e Seguro!"
-        except ConnectionRefusedError:
-            return False, "O servidor está offline. Inicia o servidor.py primeiro."
+            return False, "Falha no protocolo de Handshake."
         except Exception as e:
-            return False, f"Falha na conexão: {e}"
+            return False, f"Falha: {str(e)}"
 
-    def enviar(self, dicionario_dados):
-        """Envia pacotes de dados para o servidor, garantindo que a conexão está ativa."""
-        # A verificação 'self.socket is not None' previne o erro WinError 10038
-        if self.conectado and self.socket is not None:
+    def enviar(self, dados):
+        """Envia pacotes cifrados com Chave 1 e Chave 2"""
+        if self.conectado and self.socket:
             try:
-                mensagem = json.dumps(dicionario_dados)
-                self.socket.send(mensagem.encode('utf-8'))
-            except Exception as e:
-                print(f"Erro ao enviar dados: {e}")
-                self.fechar_conexao() # Se falhar a enviar, fecha de forma segura
-        else:
-            print("Aviso: Tentativa de envio falhou porque o cliente está desconectado.")
+                mensagem = json.dumps(dados) + "\n"
+                self.socket.sendall(mensagem.encode('utf-8'))
+            except:
+                self.fechar_conexao()
 
     def ouvir_servidor(self):
-        """Fica a escutar o servidor continuamente. Se o servidor cair, lida com o erro."""
+        buffer = ""
         while self.conectado:
             try:
-                mensagem_bytes = self.socket.recv(8192)
-                # Se receber bytes vazios, significa que o servidor encerrou a conexão
-                if not mensagem_bytes: 
-                    print("\nA conexão foi encerrada pelo servidor.")
-                    break
-                
-                dados = json.loads(mensagem_bytes.decode('utf-8'))
-                if self.ao_receber_mensagem:
-                    self.ao_receber_mensagem(dados)
-            except Exception as e:
-                print(f"\nConexão interrompida de forma inesperada: {e}")
+                chunk = self.socket.recv(8192).decode('utf-8')
+                if not chunk: break
+                buffer += chunk
+                while "\n" in buffer:
+                    linha, buffer = buffer.split("\n", 1)
+                    if linha.strip() and self.ao_receber_mensagem:
+                        self.ao_receber_mensagem(json.loads(linha))
+            except:
                 break
-        
-        # Garante que as variáveis são limpas quando o loop termina
         self.fechar_conexao()
 
     def fechar_conexao(self):
-        """Limpa o socket de forma segura para evitar o WinError 10038."""
         self.conectado = False
         if self.socket:
-            try:
-                self.socket.close()
-            except Exception:
-                pass
+            self.socket.close()
             self.socket = None
